@@ -372,8 +372,8 @@ def get_sinusoid_encoding_table(n_position, d_hid, padding_idx=PAD):
     def _get_posi_angle_vec(position):
         return [_cal_angle(position, hid_j) for hid_j in range(d_hid)]
     sinusoid_table = np.array([_get_posi_angle_vec(pos_i) for pos_i in range(n_position)])
-    sinusoid_table[:, 0::2] = np.sin(sinusoid_table[:, 0::2])  # dim 2i
-    sinusoid_table[:, 1::2] = np.cos(sinusoid_table[:, 1::2])  # dim 2i+1
+    sinusoid_table[:, 0::2] = np.sin(sinusoid_table[:, 0::2])
+    sinusoid_table[:, 1::2] = np.cos(sinusoid_table[:, 1::2])
     sinusoid_table[padding_idx] = 0.
     return torch.FloatTensor(sinusoid_table)
 
@@ -553,6 +553,67 @@ def greedy_evaluate(encoder, decoder, batch_data):
             output_words[i] =[data.output_vocab['id2word'][int(output[i][t])] for t in range(out_lens[i]-1)]
             output_corp_g.append(' '.join(output_words[i]))
             translated_corp_g.append(' '.join(decoded_words[i]))
+
+def Beam_Eval_long_time(encoder, decoder, batch_data, beam_size = 5):
+    input_g, in_lens_g, output_g, out_lens_g = batch_data
+    batch_size = input_g.size(1)
+    translation_list = []
+    decoded_words = [[] for i in range(batch_size)]
+    output_words = [[] for i in range(batch_size)]
+    with torch.no_grad():
+        encoder.eval()
+        decoder.eval()
+        input = input_g.to(device)
+        output = output_g.to(device)
+        in_lens = torch.LongTensor(in_lens_g).to(device)
+        out_lens = torch.LongTensor(out_lens_g).to(device)
+        encodered = torch.LongTensor([SOS] * batch_size).to(device)
+        encoder_outputs, decoder_hidden = encoder(input, in_lens)
+        eos_id= set()
+        for t in range(MAX_SENT_LENS_VALID + 1):
+            decoder_output, decoder_hidden, __ = decoder(encodered, in_lens, encoder_outputs, decoder_hidden)
+            topP, topI = F.log_softmax(decoder_output, dim = 1).topk(beam_size)
+            score_5 = torch.zeros(beam_size, beam_size, beam_size, beam_size, beam_size, beam_size , batch_size).to(device)
+            for i, cand_I in enumerate(topI.transpose(0,1)):
+                encodered = cand_I
+                decoder_output, decoder_hidden_1 , __ = decoder(encodered, in_lens, encoder_outputs, decoder_hidden)
+                tempP, tempI = F.log_softmax(decoder_output, dim = 1).topk(beam_size)
+                for j, cand_j in enumerate(tempI.transpose(0,1)):
+                    encodered = cand_j
+                    decoder_output, decoder_hidden_2 , __ = decoder(encodered, in_lens, encoder_outputs, decoder_hidden_1)
+                    tempP2, tempI2 = F.log_softmax(decoder_output, dim = 1).topk(beam_size)
+                    for k, cand_k in enumerate(tempI2.transpose(0,1)):
+                        encodered = cand_k
+                        decoder_output, decoder_hidden_3, __ = decoder(encodered, in_lens, encoder_outputs, decoder_hidden_2)
+                        tempP3, tempI3 = F.log_softmax(decoder_output, dim = 1).topk(beam_size)
+                        for p, cand_p in enumerate(tempI3.transpose(0,1)):
+                            encodered = cand_p
+                            decoder_output, decoder_hidden_4, __ = decoder(encodered, in_lens, encoder_outputs, decoder_hidden_3)
+                            tempP4, tempI4 = F.log_softmax(decoder_output, dim = 1).topk(beam_size)
+                            for q, cand_q in enumerate(tempI4.transpose(0,1)):
+                                encodered = cand_q
+                                decoder_output, _, __ = decoder(encodered, in_lens, encoder_outputs, decoder_hidden_4)
+                                tempP5, tempI5 = F.log_softmax(decoder_output, dim = 1).topk(beam_size)
+                                score_5[i][j][k][p][q] = topP.transpose(0,1)[i].repeat(beam_size,1) + tempP.transpose(0,1)[j].repeat(beam_size,1) + tempP2.transpose(0,1)[k].repeat(beam_size,1) + tempP3.transpose(0,1)[p].repeat(beam_size,1) + tempP4.transpose(0,1)[q].repeat(beam_size,1) + tempP5.transpose(0,1).squeeze().detach()
+            ids = torch.argmax(score_5.view(beam_size*beam_size*beam_size*beam_size*beam_size*beam_size, batch_size), dim = 0)
+            for idx in range(batch_size):
+                encodered[idx] = topI[idx][((((ids[idx]//beam_size)//beam_size)//beam_size)//beam_size)//beam_size]
+            indicator = encodered.eq(torch.LongTensor([EOS] * batch_size).to(device)).nonzero().squeeze().cpu().data.numpy().tolist()
+            if indicator is not None:
+                try:
+                    for ind in indicator:
+                        eos_id.add(ind)
+                except:
+                    eos_id.add(indicator)
+            for idx in range(batch_size):
+                if idx in eos_id: continue
+                decoded_words[idx].append(data.output_vocab['id2word'][int(encodered[idx])])
+        output = output.transpose(0,1)
+        for i in range(batch_size):
+            output_words[i] =[data.output_vocab['id2word'][int(output[i][t])] for t in range(out_lens[i]-1)]
+            output_corp.append(' '.join(output_words[i]))
+            translated_corp.append(' '.join(decoded_words[i]))
+    return
 
 
 def Beam_Eval(encoder, decoder, batch_data, beam_size = 5):
